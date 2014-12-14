@@ -2,7 +2,7 @@
 title: "Analysis"
 author: "Eduardo Ariño de la Rubia"
 date: "December 14, 2014"
-output: html_document
+output: pdf_document
 ---
 
 First we load some libraries and make sure the code can take advantage of 6 of 
@@ -93,7 +93,7 @@ Yeah, there you go. Almost certainly feat_weekend is going to be part of this.
 However, the curve we're trying to predict is very much that, it's a curve, so
 this isn't really a fit for a linear regression.
 
-```{r}
+```{r, warning=FALSE, message=FALSE}
 ggplot(data, aes(x=as.integer(as.character(feat_hour)), y=energy_usage)) + 
   geom_smooth() + 
   facet_wrap(~ feat_weekend)
@@ -151,7 +151,7 @@ train <- data[inTrain,]
 test <- data[-inTrain,]
 ```
 
-So how good are we at predicting whether it's open (by which we mean less than
+So how good are we at predicting whether it's open (by which we mean more than
 60 kWh used) using the hour, whether it's a weekend, and the month?
 
 ```{r}
