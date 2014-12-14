@@ -1,0 +1,171 @@
+---
+title: "Analysis"
+author: "Eduardo Ariño de la Rubia"
+date: "December 14, 2014"
+output: html_document
+---
+
+First we load some libraries and make sure the code can take advantage of 6 of 
+the cores on my laptop (it'll get it nice and hot!)
+
+```{r, message=FALSE, warning=FALSE}
+library(caret)
+library(lubridate)
+library(dplyr)
+#library(doMC)
+#registerDoMC(cores = 6)
+```
+
+Then we read the data
+
+```{r}
+data <- read.csv("data.csv", stringsAsFactors=FALSE)
+str(data)
+```
+
+Not a lot to work with, we have `r nrow(data)` rows and really, only two variables
+to work with, Timestamp and Energy usage. I hate the column names, so I'm going
+to go ahead and fix it.
+
+```{r}
+colnames(data) <- c("timestamp", "utc_offset", 
+                    "energy_usage", "interval", "site_id")
+```
+
+That's better. 
+
+So, let's look at the distribution of data for the energy usage, that will
+give us an idea as to what our thesis should be:
+
+```{r}
+hist(data$energy_usage)
+```
+
+So, what do we have to engineer features from? Well, the only
+real thing we have is the Timestamp variable. So, let's use lubridate and 
+engineer atomic variables. I will be using Hadley's dplyr for this. Since
+wday returns 7 for sunday and 1 for saturday, it kind of messes up some stuff,
+so I'm going to go ahead and make 1 monday and 7 sunday.
+
+```{r}
+data %>% mutate(tstamp=ymd_hms(timestamp)) %>%
+  mutate(feat_hour=hour(tstamp),
+         feat_month=month(tstamp),
+         feat_day_of_week=wday(tstamp)) %>%
+  mutate(feat_day_of_week=feat_day_of_week-1) %>%
+  mutate(feat_day_of_week=ifelse(feat_day_of_week == 0, 7, feat_day_of_week)) %>%
+          mutate(feat_weekend=feat_day_of_week %in% c(6, 7)) %>% 
+  mutate(feat_hour=as.factor(feat_hour),
+          feat_month=as.factor(feat_month),
+          feat_day_of_week=as.factor(feat_day_of_week),
+          feat_weekend=as.factor(feat_weekend)) -> data
+```
+
+So, what features did we extract:
+
+* feat_hour - the hour of the reading
+* feat_day_of_week - the day of the week
+* feat_month - the month of the reading
+* feat_weekend - a binary feature for whether things are a weekend or not
+
+Ok, so now let's visualize the data with some of these new features, for starters
+let's look by hour of the day by day of week.
+
+```{r}
+ggplot(data, aes(x=feat_hour, y=energy_usage)) + 
+  geom_bar(stat="identity") + 
+  facet_wrap(~ feat_day_of_week)
+```
+
+Pretty clear, this bank isn't open on Sundays or Saturdays (day 1 and 7). So,
+the feat_day_of_week feature is going to be silly predictive. We also created
+the "weekend" feature, which is a BINARY feature, which are incredibly powerful
+predictively, let's see what that graph looks like.
+
+```{r}
+ggplot(data, aes(x=feat_hour, y=energy_usage)) + 
+  geom_bar(stat="identity") + 
+  facet_wrap(~ feat_weekend)
+```
+
+Yeah, there you go. Almost certainly feat_weekend is going to be part of this.
+
+However, the curve we're trying to predict is very much that, it's a curve, so
+this isn't really a fit for a linear regression.
+
+```{r}
+ggplot(data, aes(x=as.integer(as.character(feat_hour)), y=energy_usage)) + 
+  geom_smooth() + 
+  facet_wrap(~ feat_weekend)
+```
+
+The problem as you stated it is a bit tough:
+
+    I’m trying to extract features from it and train a model on this sample data that predicts whether the bank of open or closed
+    
+Well, we don't have a target label for "is open" or "is closed", so the first
+thing we can do is train a *regressor* instead of a classifier, and say, given
+the features we've extracted, how good a job can we do in predicting the kWH
+that will be used?
+
+Let's bust out some caret, first we create a train/test split:
+
+```{r}
+inTrain <- createDataPartition(data$energy_usage, p=.8, list=FALSE)
+train <- data[inTrain,]
+test <- data[-inTrain,]
+```
+
+Since we're trying to do some regression, we don't have a lot of predictors. 
+We could pick something more complicated, but life is short. We're trying
+to fit non-linear data, but let's see how far a simple lm gets us.
+
+```{r}
+lm.fit <- train(energy_usage ~ feat_hour + feat_weekend + feat_month,
+                 data=train, method="lm")
+
+summary(lm.fit$finalModel)
+par(mfrow=c(2,2))
+plot(lm.fit$finalModel)
+```
+
+An adjusted R-squared of `r summary(lm.fit$finalModel)$adj.r.squared` is not
+bad. 65% of variance is predictable just using the hour of the day, whether
+it's a weekend, and what month it is! 
+
+Ok, so I guess the next question is, let's engineer a label to "classify" against,
+we're going to make an is_open label. We're literally just going to make it by
+adding a column where if energy_usage > 60 kWh, it's open. 
+
+```{r}
+data %>% mutate(is_open=as.factor(ifelse(energy_usage > 60, 
+                                         TRUE, FALSE))) -> data
+```
+
+Ok, so let's now train a simple classifer on the previous values on this new
+is_open categorical value. First we create the new train/test split.
+
+```{r}
+inTrain <- createDataPartition(data$is_open, p=.8, list=FALSE)
+train <- data[inTrain,]
+test <- data[-inTrain,]
+```
+
+So how good are we at predicting whether it's open (by which we mean less than
+60 kWh used) using the hour, whether it's a weekend, and the month?
+
+```{r}
+glm.fit <- train(as.factor(is_open) ~ feat_hour + feat_weekend + feat_month, 
+                 data=train, method="glm", trControl=trainControl(method="cv"))
+
+```
+
+Ok, our accuracy is `r glm.fit$results$Accuracy`! So, with the hour, the weekend,
+and the month, we can predict if we're going to use <60 kWh with close to 94% 
+accuracy on the training set. How do we do on the test set?
+
+```{r}
+confusionMatrix(test$is_open, predict(glm.fit, test))
+```
+
+I'd say it's a good start.
